@@ -22,6 +22,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 st.set_page_config(
     page_title="🌿 不登校・ひきこもり相談AIエージェント",
     layout="wide",
+    initial_sidebar_state="expanded",  # ✅ 起動時にサイドバーを開く
 )
 
 # ============================================================
@@ -68,42 +69,6 @@ h1 {
     font-weight: 700;
     margin-bottom: 0.3rem;
     font-size: 2.5rem;
-}
-.stTextArea textarea {
-    background-color: #d9f0d9;
-    border-radius: 1.2rem;
-    border: 1px solid #a8d5a2;
-    color: #2e4d32;
-    font-size: 1.05rem;
-    padding: 0.8rem;
-}
-.user-bubble {
-    background-color: #d0f0c0;
-    color: #1b3d1b;
-    border-radius: 1rem;
-    padding: 0.8rem;
-    margin: 0.4rem 0;
-    box-shadow: 0px 2px 6px rgba(0,0,0,0.1);
-}
-.bot-bubble {
-    background-color: #e6ffe6;
-    color: #2e7d32;
-    border-radius: 1rem;
-    padding: 0.8rem;
-    margin: 0.4rem 0;
-    box-shadow: 0px 2px 6px rgba(0,0,0,0.1);
-}
-.stButton>button {
-    background-color: #66bb6a;
-    color: white;
-    border-radius: 1.5rem;
-    border: none;
-    padding: 0.6rem 1.2rem;
-    font-size: 1rem;
-    transition: 0.2s;
-}
-.stButton>button:hover {
-    background-color: #4caf50;
 }
 footer, header {visibility: hidden;}
 </style>
@@ -193,7 +158,6 @@ if "chat_history" not in st.session_state:
 if "current_phase" not in st.session_state:
     st.session_state.current_phase = None
 
-# 内部制御用（画面表示しない）
 if "slots" not in st.session_state:
     st.session_state.slots = default_slots_from_schema(SLOT_SCHEMA)
 
@@ -225,6 +189,33 @@ def load_today_history(user_id: str):
 load_today_history(user_id)
 
 # ============================================================
+# 📅 過去日付一覧/履歴取得（sidebar & popover 共通）
+# ============================================================
+def get_date_options():
+    try:
+        res_dates = supabase.table("user_chats").select("chat_date") \
+            .eq("user_id", user_id) \
+            .order("chat_date", desc=True) \
+            .execute()
+        data_dates = res_dates.data if hasattr(res_dates, "data") else res_dates.get("data", [])
+        return sorted({row["chat_date"] for row in data_dates}, reverse=True)
+    except Exception as e:
+        st.error(f"過去の相談日リスト取得中にエラーが発生しました: {e}")
+        return []
+
+def get_hist_for_date(d: str):
+    try:
+        res_hist = supabase.table("user_chats").select("*") \
+            .eq("user_id", user_id) \
+            .eq("chat_date", d) \
+            .order("message_time", desc=False) \
+            .execute()
+        return res_hist.data if hasattr(res_hist, "data") else res_hist.get("data", [])
+    except Exception as e:
+        st.error(f"過去の相談履歴取得中にエラーが発生しました: {e}")
+        return []
+
+# ============================================================
 # 🔧 ユーティリティ：JSONの安全パース
 # ============================================================
 def safe_json_load(s: str) -> dict:
@@ -249,14 +240,13 @@ def validate_slot_value(slot_key: str, value: str) -> str:
     return "不明"
 
 # ============================================================
-# 🧠 5. システムプロンプト生成（UIに表示しない情報も回答文に内包）
+# 🧠 5. システムプロンプト生成
 # ============================================================
 def build_system_prompt(fixed_phase=None, is_first_today=False):
     prompt = ""
     prompt += "あなたは不登校・ひきこもり支援の専門家です。\n"
     prompt += "利用者に共感し、責めず、安全を優先し、現実的で具体的な一歩を提案してください。\n"
-    prompt += "知識ベース（phases/compass_principles/key_scenes/slot_schema/action_cards）に基づいて応答してください。\n"
-    prompt += "\n"
+    prompt += "知識ベース（phases/compass_principles/key_scenes/slot_schema/action_cards）に基づいて応答してください。\n\n"
     prompt += "【重要ルール】\n"
     prompt += "- 出力は必ず「JSONのみ」。本文の外に説明や注釈、Markdown、コードブロックを書かない。\n"
     prompt += "- 推測でスロットを埋めない。根拠が弱い場合は「不明」のまま。\n"
@@ -264,31 +254,28 @@ def build_system_prompt(fixed_phase=None, is_first_today=False):
     prompt += "- その質問は、次の支援分岐に直結する内容にする。\n"
     prompt += "- 質問は自然な会話文として response の中に書く（箇条書きにしない）。\n"
     prompt += "- action_cards は最大3枚まで選ぶ。\n"
-    prompt += "- ただし、質問や支援カードの内容はUIに別表示しないため、必ず response の文章の中に自然に含める（質問がある場合は文中で尋ねる。支援策は具体策として文章中に書く）。\n"
+    prompt += "- ただし、質問や支援カードの内容はUIに別表示しないため、必ず response の文章の中に自然に含める。\n"
     prompt += "- 緊急性が高い可能性があるときは、安全確保の確認を優先する。\n"
     prompt += "- 抽象的な理念だけで終わらせない。\n"
     prompt += "- 必ず具体的な声かけ例を最低2つ提示する。\n"
     prompt += "- 必ず段階的な小さな行動例（0か100かではない中間案）を2つ以上提示する。\n"
     prompt += "- 明日そのまま使える表現にする。\n"
     prompt += "- 命令口調や断定は避ける。\n"
-    prompt += "- 実務性と安心感のバランスを取る。\n"
-    prompt += "\n"
+    prompt += "- 実務性と安心感のバランスを取る。\n\n"
 
     if is_first_today:
         prompt += "今日はその日の最初の相談です。発言内容から phase_1〜phase_4 を一つだけ推定してください。\n"
     else:
         prompt += f"本日のフェーズは {fixed_phase} に固定です。再推定してはいけません。\n"
 
-    prompt += "\n"
-    prompt += "【あなたが返すJSON形式】\n"
+    prompt += "\n【あなたが返すJSON形式】\n"
     prompt += "{\n"
     prompt += '  "phase": "phase_1|phase_2|phase_3|phase_4",\n'
     prompt += '  "slots_update": { "SLOT_KEY": "VALUE", "...": "..." },\n'
     prompt += '  "questions": ["質問1","質問2"],\n'
     prompt += '  "selected_action_card_ids": ["AC_...","AC_..."],\n'
-    prompt += '  "response": "相談者への回答（この文章の中に、必要な確認質問も、具体的支援も、次の一歩も全部含める）"\n'
-    prompt += "}\n"
-    prompt += "\n"
+    prompt += '  "response": "相談者への回答（この文章の中に、確認質問も、具体支援も、次の一歩も全部含める）"\n'
+    prompt += "}\n\n"
 
     prompt += "【現在のスロット（既知情報）】\n"
     prompt += json.dumps(st.session_state.slots, ensure_ascii=False, indent=2) + "\n\n"
@@ -299,7 +286,7 @@ def build_system_prompt(fixed_phase=None, is_first_today=False):
     return prompt
 
 # ============================================================
-# 🤖 6. GPT応答生成 ＋ Supabase 保存（UI表示用の質問/カードは保持しない）
+# 🤖 6. GPT応答生成 ＋ Supabase 保存
 # ============================================================
 def generate_response(user_input: str) -> str:
     is_first_today = (len(st.session_state.chat_history) == 0 or st.session_state.current_phase is None)
@@ -323,7 +310,7 @@ def generate_response(user_input: str) -> str:
     try:
         obj = safe_json_load(raw)
     except Exception as e:
-        st.error(f"AIの出力JSONの解析に失敗しました（形式乱れの可能性）: {e}")
+        st.error(f"AIの出力JSONの解析に失敗しました: {e}")
         response_text = raw
         phase_for_row = st.session_state.current_phase or "phase_1"
         try:
@@ -370,7 +357,7 @@ def generate_response(user_input: str) -> str:
     return response_text
 
 # ============================================================
-# 🧾 Sidebar（履歴はサイドバーへ / ログアウト）
+# 🧾 Sidebar（履歴＋ログアウト）
 # ============================================================
 with st.sidebar:
     st.markdown(f"**ログイン中:** {getattr(user, 'email', '')}")
@@ -379,7 +366,6 @@ with st.sidebar:
     st.markdown(f"- 日付: {today_str}")
     st.markdown(f"- Phase: `{st.session_state.current_phase or '未推定'}`")
 
-    # 今日の履歴（簡易一覧）
     st.markdown("---")
     st.markdown("### 💬 今日の履歴（一覧）")
     if st.session_state.chat_history:
@@ -391,20 +377,9 @@ with st.sidebar:
     else:
         st.caption("まだ今日の履歴はありません。")
 
-    # 過去の履歴（日付選択）
     st.markdown("---")
     st.markdown("### 📅 過去の相談をひらく")
-
-    try:
-        res_dates = supabase.table("user_chats").select("chat_date") \
-            .eq("user_id", user_id) \
-            .order("chat_date", desc=True) \
-            .execute()
-        data_dates = res_dates.data if hasattr(res_dates, "data") else res_dates.get("data", [])
-        date_options = sorted({row["chat_date"] for row in data_dates}, reverse=True)
-    except Exception as e:
-        st.error(f"過去の相談日リスト取得中にエラーが発生しました: {e}")
-        date_options = []
+    date_options = get_date_options()
 
     if date_options:
         selected_date = st.selectbox(
@@ -413,24 +388,11 @@ with st.sidebar:
             format_func=lambda d: str(d),
             key="history_date_select_sidebar"
         )
-
         if selected_date:
-            st.markdown(f"**{selected_date} の相談履歴**")
-            try:
-                res_hist = supabase.table("user_chats").select("*") \
-                    .eq("user_id", user_id) \
-                    .eq("chat_date", selected_date) \
-                    .order("message_time", desc=False) \
-                    .execute()
-                hist = res_hist.data if hasattr(res_hist, "data") else res_hist.get("data", [])
-            except Exception as e:
-                st.error(f"過去の相談履歴取得中にエラーが発生しました: {e}")
-                hist = []
-
+            hist = get_hist_for_date(selected_date)
             if not hist:
                 st.caption("この日には記録された相談はありません。")
             else:
-                # サイドバーは縦が狭いので直近のみプレビュー
                 for row in hist[-20:]:
                     um = (row.get("user_message", "") or "").replace("\n", " ")
                     bm = (row.get("bot_message", "") or "").replace("\n", " ")
@@ -472,6 +434,50 @@ if st.session_state.current_phase is None:
 for key, label in phase_display:
     mark = "●" if st.session_state.current_phase == key else "○"
     st.markdown(f"[{mark}] {label}")
+
+# ============================================================
+# ✅ メインにも「履歴を開く」ボタン（popover）
+#    → サイドバーが閉じていても履歴にアクセスできる
+# ============================================================
+with st.popover("📚 履歴・今日の状態を開く"):
+    st.markdown("### 🧭 今日の状態")
+    st.markdown(f"- 日付: {today_str}")
+    st.markdown(f"- Phase: `{st.session_state.current_phase or '未推定'}`")
+
+    st.markdown("---")
+    st.markdown("### 💬 今日の履歴（一覧）")
+    if st.session_state.chat_history:
+        for i, chat in enumerate(st.session_state.chat_history, start=1):
+            preview = (chat.get("user", "") or "").replace("\n", " ")
+            if len(preview) > 30:
+                preview = preview[:30] + "…"
+            st.markdown(f"{i}. {preview}")
+    else:
+        st.caption("まだ今日の履歴はありません。")
+
+    st.markdown("---")
+    st.markdown("### 📅 過去の相談をひらく")
+    date_options_pop = get_date_options()
+
+    if date_options_pop:
+        selected_date_pop = st.selectbox(
+            "日付を選択",
+            options=date_options_pop,
+            format_func=lambda d: str(d),
+            key="history_date_select_popover"  # ✅ sidebarと別キー
+        )
+        if selected_date_pop:
+            hist_pop = get_hist_for_date(selected_date_pop)
+            if not hist_pop:
+                st.caption("この日には記録された相談はありません。")
+            else:
+                for row in hist_pop[-20:]:
+                    um = (row.get("user_message", "") or "").replace("\n", " ")
+                    bm = (row.get("bot_message", "") or "").replace("\n", " ")
+                    st.markdown(f"- **あなた**: {um[:40]}{'…' if len(um)>40 else ''}")
+                    st.markdown(f"  **AI**: {bm[:40]}{'…' if len(bm)>40 else ''}")
+    else:
+        st.caption("まだ過去の相談はありません。")
 
 st.markdown("---")
 
