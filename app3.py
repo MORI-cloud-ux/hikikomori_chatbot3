@@ -1,0 +1,607 @@
+import streamlit as st
+from openai import OpenAI
+import json
+import re
+from datetime import date
+from supabase import create_client, Client
+from pathlib import Path
+
+# --- ✅ アクセス制限パス設定（全体への入口） ---
+ACCESS_PASS = "forest2025"
+
+# --- APIキー（Secrets管理） ---
+API_KEY = st.secrets["OPENAI_API_KEY"]
+client = OpenAI(api_key=API_KEY)
+
+# --- Supabaseクライアント ---
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# --- Streamlit UI設定 ---
+st.set_page_config(
+    page_title="🌿 不登校・ひきこもり相談AIエージェント",
+    layout="wide",
+)
+
+# ============================================================
+# 📚 0. 知識ベースJSONの読み込み（knowledge_base.json）
+# ============================================================
+@st.cache_data
+def load_knowledge_base(path: str = "knowledge_base.json") -> dict:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(
+            f"知識ベースJSONが見つかりません: {p.resolve()}\n"
+            "アプリ（この.py）と同じフォルダに 'knowledge_base.json' を置いてください。"
+        )
+    text = p.read_text(encoding="utf-8")
+    return json.loads(text)
+
+try:
+    knowledge_base = load_knowledge_base("knowledge_base.json")
+except Exception as e:
+    st.error(f"知識ベースJSONの読み込みに失敗しました: {e}")
+    st.stop()
+
+# action_cards をID→カードの辞書へ
+ACTION_CARDS = {}
+for card in knowledge_base.get("action_cards", []) or []:
+    cid = card.get("id")
+    if cid:
+        ACTION_CARDS[cid] = card
+
+# slot_schema
+SLOT_SCHEMA = knowledge_base.get("slot_schema", {}) or {}
+
+def default_slots_from_schema(schema: dict) -> dict:
+    slots = {}
+    for k, meta in schema.items():
+        # valuesに「不明」がある前提だが、なければ不明を採用
+        slots[k] = "不明"
+    return slots
+
+# --- カスタムCSS ---
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic&display=swap');
+body {
+    font-family: 'Zen Maru Gothic', sans-serif;
+    background: linear-gradient(180deg, #fff7ec 0%, #fff1de 50%, #ffeacf 100%);
+    color: #333;
+}
+.stApp { padding: 2rem; }
+h1 {
+    color: #2e7d32;
+    text-align: center;
+    font-weight: 700;
+    margin-bottom: 0.3rem;
+    font-size: 2.5rem;
+}
+.stTextArea textarea {
+    background-color: #d9f0d9;
+    border-radius: 1.2rem;
+    border: 1px solid #a8d5a2;
+    color: #2e4d32;
+    font-size: 1.05rem;
+    padding: 0.8rem;
+}
+.user-bubble {
+    background-color: #d0f0c0;
+    color: #1b3d1b;
+    border-radius: 1rem;
+    padding: 0.8rem;
+    margin: 0.4rem 0;
+    box-shadow: 0px 2px 6px rgba(0,0,0,0.1);
+}
+.bot-bubble {
+    background-color: #e6ffe6;
+    color: #2e7d32;
+    border-radius: 1rem;
+    padding: 0.8rem;
+    margin: 0.4rem 0;
+    box-shadow: 0px 2px 6px rgba(0,0,0,0.1);
+}
+.stButton>button {
+    background-color: #66bb6a;
+    color: white;
+    border-radius: 1.5rem;
+    border: none;
+    padding: 0.6rem 1.2rem;
+    font-size: 1rem;
+    transition: 0.2s;
+}
+.stButton>button:hover {
+    background-color: #4caf50;
+}
+footer, header {visibility: hidden;}
+</style>
+""", unsafe_allow_html=True)
+
+# ============================================================
+# 🔐 1. アクセス用パスワード認証（共通の入口）
+# ============================================================
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    st.markdown("<h1>🌿 不登校・ひきこもり相談AIエージェントへようこそ</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center;color:#2e7d32;'>アクセスにはパスワードが必要です</p>", unsafe_allow_html=True)
+    password_input = st.text_input("🔑 アクセス用パスワードを入力してください", type="password", placeholder="パスワードを入力")
+    if st.button("はじめる 🌱"):
+        if password_input == ACCESS_PASS:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("パスワードが違います。")
+    st.stop()
+
+# ============================================================
+# 🧑‍💻 2. Supabase ユーザー登録・ログイン
+# ============================================================
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+if st.session_state.user is None:
+    st.markdown("<h1>👥 ログイン / 新規登録</h1>", unsafe_allow_html=True)
+
+    tab_login, tab_signup = st.tabs(["ログイン", "新規登録"])
+
+    with tab_login:
+        login_email = st.text_input("メールアドレス", key="login_email")
+        login_password = st.text_input("パスワード", type="password", key="login_password")
+
+        if st.button("ログイン"):
+            if not login_email or not login_password:
+                st.error("メールアドレスとパスワードを入力してください。")
+            else:
+                try:
+                    res = supabase.auth.sign_in_with_password(
+                        {"email": login_email, "password": login_password}
+                    )
+                    st.session_state.user = res.user
+                    st.success("ログインしました。")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"ログインに失敗しました: {e}")
+
+    with tab_signup:
+        signup_email = st.text_input("新規登録用メールアドレス", key="signup_email")
+        signup_password = st.text_input("新規登録用パスワード（6文字以上推奨）", type="password", key="signup_password")
+
+        if st.button("アカウント作成"):
+            if not signup_email or not signup_password:
+                st.error("メールアドレスとパスワードを入力してください。")
+            else:
+                try:
+                    supabase.auth.sign_up({"email": signup_email, "password": signup_password})
+                    st.success("登録しました。確認メールが届いていれば、メール認証後にログインしてください。")
+                except Exception as e:
+                    st.error(f"登録に失敗しました: {e}")
+
+    st.stop()
+
+# ここに来たら Supabase ログイン済み
+user = st.session_state.user
+user_id = getattr(user, "id", None)
+if user_id is None and isinstance(user, dict):
+    user_id = user.get("id")
+
+if not user_id:
+    st.error("ユーザーIDが取得できませんでした。Supabaseの認証設定を確認してください。")
+    st.stop()
+
+today_str = date.today().isoformat()
+
+# ============================================================
+# 🌱 3. チャット用のセッション状態（slots含む）
+# ============================================================
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []  # 今日の会話のみ（DBから読み込み）
+
+if "current_phase" not in st.session_state:
+    st.session_state.current_phase = None
+
+if "slots" not in st.session_state:
+    st.session_state.slots = default_slots_from_schema(SLOT_SCHEMA)
+
+if "last_questions" not in st.session_state:
+    st.session_state.last_questions = []
+
+if "last_selected_cards" not in st.session_state:
+    st.session_state.last_selected_cards = []
+
+# ============================================================
+# 📥 4. 今日の会話履歴を Supabase から読み込む（フェーズ復元）
+# ============================================================
+def load_today_history(user_id: str):
+    try:
+        res = supabase.table("user_chats").select("*") \
+            .eq("user_id", user_id) \
+            .eq("chat_date", today_str) \
+            .order("message_time", desc=False) \
+            .execute()
+        data = res.data if hasattr(res, "data") else res.get("data", [])
+    except Exception as e:
+        st.error(f"会話履歴の読み込み中にエラーが発生しました: {e}")
+        data = []
+
+    history = []
+    current_phase = None
+    for row in data:
+        history.append({"user": row.get("user_message", ""), "bot": row.get("bot_message", "")})
+        if row.get("phase") and current_phase is None:
+            current_phase = row.get("phase")
+
+    st.session_state.chat_history = history
+    st.session_state.current_phase = current_phase
+
+load_today_history(user_id)
+
+# ============================================================
+# 🔧 ユーティリティ：JSONの安全パース
+# ============================================================
+def safe_json_load(s: str) -> dict:
+    """
+    LLMが余計な文字を混ぜても、最初の {...} を抜き出してJSON parseする救済。
+    それでもダメなら例外を投げる。
+    """
+    try:
+        return json.loads(s)
+    except Exception:
+        m = re.search(r"\{.*\}", s, flags=re.DOTALL)
+        if not m:
+            raise
+        return json.loads(m.group(0))
+
+def normalize_phase(p: str) -> str:
+    if p in ["phase_1", "phase_2", "phase_3", "phase_4"]:
+        return p
+    return "phase_1"
+
+def validate_slot_value(slot_key: str, value: str) -> str:
+    """
+    schemaのvaluesに含まれれば採用。なければ不明。
+    """
+    meta = SLOT_SCHEMA.get(slot_key, {})
+    allowed = meta.get("values", []) or []
+    if value in allowed:
+        return value
+    # valuesに不明がない場合でも、保険で不明
+    return "不明"
+
+# ============================================================
+# 🧠 5. システムプロンプト生成（JSON出力を強制）
+# ============================================================
+def build_system_prompt(fixed_phase=None, is_first_today=False):
+    prompt = ""
+    prompt += "あなたは不登校・ひきこもり支援の専門家です。\n"
+    prompt += "利用者に共感し、責めず、現実的で安全な一歩を提案してください。\n"
+    prompt += "知識ベース（phases/compass_principles/key_scenes/slot_schema/action_cards）に基づいて応答してください。\n"
+    prompt += "\n"
+    prompt += "【重要ルール】\n"
+    prompt += "- 出力は必ず「JSONのみ」。本文の外に説明や注釈、Markdown、コードブロックを書かない。\n"
+    prompt += "- 推測でスロットを埋めない。根拠が弱い場合は「不明」のまま。\n"
+    prompt += "- 確認質問は最大2つ。必要な分岐に直結するものだけ。\n"
+    prompt += "- action_cards は最大3枚まで選ぶ。選ぶ時は id を返す。\n"
+    prompt += "- 緊急性が高い可能性があるときは、安全確保の確認を優先する（一般助言を先にしない）。\n"
+    prompt += "\n"
+
+    if is_first_today:
+        prompt += "今日はその日の最初の相談です。発言内容から phase_1〜phase_4 を一つだけ推定してください。\n"
+    else:
+        prompt += f"本日のフェーズは {fixed_phase} に固定です。再推定してはいけません。\n"
+
+    prompt += "\n"
+    prompt += "【あなたが返すJSON形式】\n"
+    prompt += "{\n"
+    prompt += '  "phase": "phase_1|phase_2|phase_3|phase_4",\n'
+    prompt += '  "slots_update": { "SLOT_KEY": "VALUE", "...": "..." },\n'
+    prompt += '  "questions": ["質問1","質問2"],\n'
+    prompt += '  "selected_action_card_ids": ["AC_...","AC_..."],\n'
+    prompt += '  "response": "相談者への回答（共感→要約→質問→提案の順。短く具体的に）"\n'
+    prompt += "}\n"
+    prompt += "\n"
+
+    prompt += "【現在のスロット（既知情報）】\n"
+    prompt += json.dumps(st.session_state.slots, ensure_ascii=False, indent=2) + "\n\n"
+
+    prompt += "【知識ベース】\n"
+    prompt += json.dumps(knowledge_base, ensure_ascii=False, indent=2)
+
+    return prompt
+
+# ============================================================
+# 🤖 6. GPT応答生成 ＋ Supabase 保存（JSONをパースして状態更新）
+# ============================================================
+def generate_response(user_input: str) -> str:
+    is_first_today = (len(st.session_state.chat_history) == 0 or st.session_state.current_phase is None)
+    fixed_phase = None if is_first_today else st.session_state.current_phase
+
+    messages = [{"role": "system", "content": build_system_prompt(fixed_phase=fixed_phase, is_first_today=is_first_today)}]
+
+    # 今日の履歴だけ渡す（保存している bot_message = response_text）
+    for chat in st.session_state.chat_history:
+        messages.append({"role": "user", "content": f"相談者の発言: {chat['user']}"})
+        messages.append({"role": "assistant", "content": chat["bot"]})
+
+    messages.append({"role": "user", "content": f"相談者の発言: {user_input}"})
+
+    resp = client.chat.completions.create(
+        model="gpt-4o",
+        messages=messages,
+        temperature=0.7,
+    )
+    raw = resp.choices[0].message.content.strip()
+
+    try:
+        obj = safe_json_load(raw)
+    except Exception as e:
+        st.error(f"AIの出力JSONの解析に失敗しました。出力形式の乱れの可能性があります。\n{e}")
+        # 解析できない場合は、rawをそのまま返して保存（最低限動かす）
+        response_text = raw
+        phase_for_row = st.session_state.current_phase or "phase_1"
+        try:
+            supabase.table("user_chats").insert({
+                "user_id": user_id,
+                "chat_date": today_str,
+                "user_message": user_input,
+                "bot_message": response_text,
+                "phase": phase_for_row
+            }).execute()
+        except Exception as e2:
+            st.error(f"会話の保存中にエラーが発生しました: {e2}")
+        st.session_state.last_questions = []
+        st.session_state.last_selected_cards = []
+        return response_text
+
+    # --- phase ---
+    phase_out = normalize_phase(obj.get("phase", "phase_1"))
+    if is_first_today:
+        st.session_state.current_phase = phase_out
+    # 2回目以降は固定（LLMがズラしても上書き）
+    phase_for_row = st.session_state.current_phase or phase_out
+
+    # --- slots_update ---
+    slots_update = obj.get("slots_update", {}) or {}
+    for k in st.session_state.slots.keys():
+        if k in slots_update:
+            v = slots_update.get(k)
+            if isinstance(v, str):
+                v_norm = validate_slot_value(k, v)
+                # 「不明」以外のみ採用（既知を不明で潰さない）
+                if v_norm != "不明":
+                    st.session_state.slots[k] = v_norm
+
+    # --- questions ---
+    questions = obj.get("questions", []) or []
+    if not isinstance(questions, list):
+        questions = []
+    # 最大2つに制限
+    questions = [q for q in questions if isinstance(q, str) and q.strip()][:2]
+
+    # --- selected_action_card_ids ---
+    selected_cards = obj.get("selected_action_card_ids", []) or []
+    if not isinstance(selected_cards, list):
+        selected_cards = []
+    selected_cards = [c for c in selected_cards if isinstance(c, str) and c.strip()]
+    selected_cards = selected_cards[:3]
+
+    # --- response text ---
+    response_text = obj.get("response", "").strip()
+    if not response_text:
+        response_text = "（すみません、うまく回答を生成できませんでした。もう一度、状況を短く教えてください。）"
+
+    # --- Supabase に保存 ---
+    try:
+        supabase.table("user_chats").insert({
+            "user_id": user_id,
+            "chat_date": today_str,
+            "user_message": user_input,
+            "bot_message": response_text,
+            "phase": phase_for_row
+        }).execute()
+    except Exception as e:
+        st.error(f"会話の保存中にエラーが発生しました: {e}")
+
+    # --- セッションに保持（UI表示用） ---
+    st.session_state.last_questions = questions
+    st.session_state.last_selected_cards = selected_cards
+
+    return response_text
+
+# ============================================================
+# 🧾 Sidebar（ログアウト＋状態表示）
+# ============================================================
+with st.sidebar:
+    st.markdown(f"**ログイン中:** {getattr(user, 'email', '')}")
+
+    st.markdown("---")
+    st.markdown("### 🧭 今日の状態")
+    st.markdown(f"- 日付: {today_str}")
+    st.markdown(f"- Phase: `{st.session_state.current_phase or '未推定'}`")
+
+    # slots 表示
+    st.markdown("### 🧩 スロット（推定）")
+    for k, v in st.session_state.slots.items():
+        desc = SLOT_SCHEMA.get(k, {}).get("desc", k)
+        st.markdown(f"- {desc}: **{v}**")
+
+    st.markdown("---")
+    if st.button("ログアウト"):
+        st.session_state.user = None
+        st.session_state.chat_history = []
+        st.session_state.current_phase = None
+        st.session_state.slots = default_slots_from_schema(SLOT_SCHEMA)
+        st.session_state.last_questions = []
+        st.session_state.last_selected_cards = []
+        try:
+            supabase.auth.sign_out()
+        except Exception:
+            pass
+        st.rerun()
+
+# ============================================================
+# 🏷 7. タイトル・フェーズ表示
+# ============================================================
+st.markdown("<h1>AIエージェントへ相談する</h1>", unsafe_allow_html=True)
+st.markdown("<p style='text-align:center; color:#2e7d32;'>温かく寄り添い、少しずつ一歩を。</p>", unsafe_allow_html=True)
+
+st.markdown("### 現在の気持ちの推定フェーズ")
+
+phase_display = [
+    ("phase_1", "Phase 1：閉塞期（閉じこもり・虚無感を感じる時期）"),
+    ("phase_2", "Phase 2：揺らぎ期（関係を求めたい気持ちと不安がある時期）"),
+    ("phase_3", "Phase 3：希求・模索期（関わりや意味の模索している時期）"),
+    ("phase_4", "Phase 4：転回期（価値観の転換と再出発に向けた時期）"),
+]
+
+if st.session_state.current_phase is None:
+    st.markdown("まだフェーズは推定されていません。最初の相談内容を送信すると推定されます。")
+
+for key, label in phase_display:
+    mark = "●" if st.session_state.current_phase == key else "○"
+    st.markdown(f"[{mark}] {label}")
+
+st.markdown("---")
+
+# ============================================================
+# 📤 8. 送信処理
+# ============================================================
+def submit():
+    user_text = st.session_state.get("user_input", "").strip()
+    if not user_text:
+        st.warning("何か入力してください。")
+        return
+    with st.spinner("AIエージェントは考えています…"):
+        try:
+            generate_response(user_text)
+        except Exception as e:
+            st.error(f"エラー: {e}")
+            return
+    st.session_state["user_input"] = ""
+    st.rerun()
+
+# --- 入力欄 ---
+st.text_area(
+    "ご相談内容を入力してください",
+    height=120,
+    placeholder="どんなことでも大丈夫です。",
+    key="user_input"
+)
+st.button("送信 🌱", on_click=submit)
+
+# ============================================================
+# ✅ 9. 追加質問（インタラクティブ）
+# ============================================================
+if st.session_state.last_questions:
+    st.markdown("### ✅ 追加で教えてほしいこと（最大2つ）")
+    for q in st.session_state.last_questions:
+        st.markdown(f"- {q}")
+
+# ============================================================
+# 🧭 10. 支援カード表示（action_cards）
+# ============================================================
+if st.session_state.last_selected_cards:
+    st.markdown("### 🧭 今回の支援のヒント（支援カード）")
+    for cid in st.session_state.last_selected_cards:
+        card = ACTION_CARDS.get(cid)
+        if not card:
+            st.markdown(f"- {cid}（カード詳細が見つかりません）")
+            continue
+
+        title = card.get("title", cid)
+        with st.expander(f"🌿 {title}（{cid}）", expanded=True):
+            scene = card.get("scene", "")
+            if scene:
+                st.markdown(f"**場面:** {scene}")
+
+            do_list = card.get("do", []) or []
+            if do_list:
+                st.markdown("**やってみること**")
+                for item in do_list:
+                    st.markdown(f"- {item}")
+
+            avoid_list = card.get("avoid", []) or []
+            if avoid_list:
+                st.markdown("**避けたいこと**")
+                for item in avoid_list:
+                    st.markdown(f"- {item}")
+
+            phrases = card.get("phrases", []) or []
+            if phrases:
+                st.markdown("**声かけ例**")
+                for p in phrases:
+                    st.markdown(f"- {p}")
+
+            next_step = card.get("next_step", "")
+            if next_step:
+                st.markdown(f"**次の一歩:** {next_step}")
+
+# ============================================================
+# 🕒 11. 今日の会話履歴表示（画面下）
+# ============================================================
+st.markdown("### 💬 今日の対話")
+
+for chat in st.session_state.chat_history:
+    st.markdown(
+        f"<div class='user-bubble'><b>あなた：</b> {chat['user']}</div>",
+        unsafe_allow_html=True
+    )
+    st.markdown(
+        f"<div class='bot-bubble'><b>AIエージェント：</b> {chat['bot']}</div>",
+        unsafe_allow_html=True
+    )
+
+# ============================================================
+# 📅 12. 過去の会話を日付選択で閲覧
+# ============================================================
+st.markdown("---")
+st.markdown("### 📅 過去の相談をひらく")
+
+try:
+    res_dates = supabase.table("user_chats").select("chat_date") \
+        .eq("user_id", user_id) \
+        .order("chat_date", desc=True) \
+        .execute()
+    data_dates = res_dates.data if hasattr(res_dates, "data") else res_dates.get("data", [])
+    date_options = sorted({row["chat_date"] for row in data_dates}, reverse=True)
+except Exception as e:
+    st.error(f"過去の相談日リスト取得中にエラーが発生しました: {e}")
+    date_options = []
+
+if date_options:
+    selected_date = st.selectbox(
+        "日付を選択すると、その日の相談内容が表示されます",
+        options=date_options,
+        format_func=lambda d: str(d),
+        key="history_date_select"
+    )
+
+    if selected_date:
+        st.markdown(f"#### 📖 {selected_date} の相談履歴")
+        try:
+            res_hist = supabase.table("user_chats").select("*") \
+                .eq("user_id", user_id) \
+                .eq("chat_date", selected_date) \
+                .order("message_time", desc=False) \
+                .execute()
+            hist = res_hist.data if hasattr(res_hist, "data") else res_hist.get("data", [])
+        except Exception as e:
+            st.error(f"過去の相談履歴取得中にエラーが発生しました: {e}")
+            hist = []
+
+        if not hist:
+            st.info("この日には記録された相談はありません。")
+        else:
+            for row in hist:
+                st.markdown(
+                    f"<div class='user-bubble'><b>あなた：</b> {row.get('user_message','')}</div>",
+                    unsafe_allow_html=True
+                )
+                st.markdown(
+                    f"<div class='bot-bubble'><b>AIエージェント：</b> {row.get('bot_message','')}</div>",
+                    unsafe_allow_html=True
+                )
+else:
+    st.info("まだ記録された過去の相談はありません。")
