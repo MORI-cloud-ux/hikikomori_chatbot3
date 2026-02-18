@@ -165,6 +165,17 @@ if "slots" not in st.session_state:
 if "view_date" not in st.session_state:
     st.session_state.view_date = today_str
 
+# ✅ 日付が変わったら状態をリセット（アプリ開きっぱなし対策）
+if "app_date" not in st.session_state:
+    st.session_state.app_date = today_str
+
+if st.session_state.app_date != today_str:
+    st.session_state.app_date = today_str
+    st.session_state.chat_history = []
+    st.session_state.current_phase = None
+    st.session_state.slots = default_slots_from_schema(SLOT_SCHEMA)
+    st.session_state.view_date = today_str
+
 # ============================================================
 # 📥 4. 今日の会話履歴を Supabase から読み込む（フェーズ復元）
 # ============================================================
@@ -203,7 +214,6 @@ def get_date_options():
             .execute()
         data_dates = res_dates.data if hasattr(res_dates, "data") else res_dates.get("data", [])
         opts = sorted({row["chat_date"] for row in data_dates}, reverse=True)
-        # 今日が無い場合は追加（空でも選べるように）
         if today_str not in opts:
             opts = [today_str] + opts
         return opts
@@ -222,6 +232,31 @@ def get_hist_for_date(d: str):
     except Exception as e:
         st.error(f"過去の相談履歴取得中にエラーが発生しました: {e}")
         return []
+
+def get_phase_timeline():
+    """
+    日ごとのフェーズ（その日の最初に確定したphase）を一覧で返す
+    """
+    try:
+        res = supabase.table("user_chats").select("chat_date,phase,message_time") \
+            .eq("user_id", user_id) \
+            .order("chat_date", desc=False) \
+            .order("message_time", desc=False) \
+            .execute()
+        rows = res.data if hasattr(res, "data") else res.get("data", [])
+    except Exception as e:
+        st.error(f"フェーズ履歴の取得中にエラーが発生しました: {e}")
+        return []
+
+    first_phase_by_date = {}
+    for r in rows:
+        d = r.get("chat_date")
+        ph = r.get("phase")
+        if d and ph and d not in first_phase_by_date:
+            first_phase_by_date[d] = ph
+
+    timeline = [{"chat_date": d, "phase": first_phase_by_date[d]} for d in sorted(first_phase_by_date.keys())]
+    return timeline
 
 # ============================================================
 # 🔧 ユーティリティ：JSONの安全パース
@@ -365,7 +400,7 @@ def generate_response(user_input: str) -> str:
     return response_text
 
 # ============================================================
-# 🧾 Sidebar（日付選択＋ログアウト）
+# 🧾 Sidebar（日付選択＋フェーズ推移＋ログアウト）
 # ============================================================
 with st.sidebar:
     st.markdown(f"**ログイン中:** {getattr(user, 'email', '')}")
@@ -392,12 +427,23 @@ with st.sidebar:
     st.session_state.view_date = selected_date
 
     st.markdown("---")
+    st.markdown("### 📈 フェーズの推移（日別）")
+    timeline = get_phase_timeline()
+    if not timeline:
+        st.caption("まだフェーズ履歴がありません。")
+    else:
+        # 新しい日付が上
+        for item in timeline[::-1]:
+            st.markdown(f"- {item['chat_date']}: `{item['phase']}`")
+
+    st.markdown("---")
     if st.button("ログアウト"):
         st.session_state.user = None
         st.session_state.chat_history = []
         st.session_state.current_phase = None
         st.session_state.slots = default_slots_from_schema(SLOT_SCHEMA)
         st.session_state.view_date = today_str
+        st.session_state.app_date = today_str
         try:
             supabase.auth.sign_out()
         except Exception:
@@ -451,6 +497,15 @@ with st.popover("📚 履歴・今日の状態を開く"):
     )
     st.session_state.view_date = selected_date_pop
 
+    st.markdown("---")
+    st.markdown("### 📈 フェーズの推移（日別）")
+    timeline2 = get_phase_timeline()
+    if not timeline2:
+        st.caption("まだフェーズ履歴がありません。")
+    else:
+        for item in timeline2[::-1]:
+            st.markdown(f"- {item['chat_date']}: `{item['phase']}`")
+
 st.markdown("---")
 
 # ============================================================
@@ -464,7 +519,19 @@ else:
     rows = get_hist_for_date(view_date)
     display_history = [{"user": r.get("user_message", ""), "bot": r.get("bot_message", "")} for r in rows]
 
+# ✅ 表示中の日付のPhaseを表示（過去閲覧でも確認できる）
+phase_for_view = None
+if view_date == today_str:
+    phase_for_view = st.session_state.current_phase
+else:
+    rows_view = get_hist_for_date(view_date)
+    for r in rows_view:
+        if r.get("phase"):
+            phase_for_view = r.get("phase")
+            break
+
 st.markdown(f"### 💬 対話（{view_date}）")
+st.markdown(f"**🧭 表示中の日付:** {view_date}　／　**Phase:** `{phase_for_view or '未推定'}`")
 
 if not display_history:
     st.info("この日に記録された相談はありません。")
