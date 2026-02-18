@@ -370,7 +370,7 @@ def generate_response(user_input: str) -> str:
     return response_text
 
 # ============================================================
-# 🧾 Sidebar（ログアウトのみ＋最小表示）
+# 🧾 Sidebar（履歴はサイドバーへ / ログアウト）
 # ============================================================
 with st.sidebar:
     st.markdown(f"**ログイン中:** {getattr(user, 'email', '')}")
@@ -378,6 +378,67 @@ with st.sidebar:
     st.markdown("### 🧭 今日の状態")
     st.markdown(f"- 日付: {today_str}")
     st.markdown(f"- Phase: `{st.session_state.current_phase or '未推定'}`")
+
+    # 今日の履歴（簡易一覧）
+    st.markdown("---")
+    st.markdown("### 💬 今日の履歴（一覧）")
+    if st.session_state.chat_history:
+        for i, chat in enumerate(st.session_state.chat_history, start=1):
+            preview = (chat.get("user", "") or "").replace("\n", " ")
+            if len(preview) > 30:
+                preview = preview[:30] + "…"
+            st.markdown(f"{i}. {preview}")
+    else:
+        st.caption("まだ今日の履歴はありません。")
+
+    # 過去の履歴（日付選択）
+    st.markdown("---")
+    st.markdown("### 📅 過去の相談をひらく")
+
+    try:
+        res_dates = supabase.table("user_chats").select("chat_date") \
+            .eq("user_id", user_id) \
+            .order("chat_date", desc=True) \
+            .execute()
+        data_dates = res_dates.data if hasattr(res_dates, "data") else res_dates.get("data", [])
+        date_options = sorted({row["chat_date"] for row in data_dates}, reverse=True)
+    except Exception as e:
+        st.error(f"過去の相談日リスト取得中にエラーが発生しました: {e}")
+        date_options = []
+
+    if date_options:
+        selected_date = st.selectbox(
+            "日付を選択",
+            options=date_options,
+            format_func=lambda d: str(d),
+            key="history_date_select_sidebar"
+        )
+
+        if selected_date:
+            st.markdown(f"**{selected_date} の相談履歴**")
+            try:
+                res_hist = supabase.table("user_chats").select("*") \
+                    .eq("user_id", user_id) \
+                    .eq("chat_date", selected_date) \
+                    .order("message_time", desc=False) \
+                    .execute()
+                hist = res_hist.data if hasattr(res_hist, "data") else res_hist.get("data", [])
+            except Exception as e:
+                st.error(f"過去の相談履歴取得中にエラーが発生しました: {e}")
+                hist = []
+
+            if not hist:
+                st.caption("この日には記録された相談はありません。")
+            else:
+                # サイドバーは縦が狭いので直近のみプレビュー
+                for row in hist[-20:]:
+                    um = (row.get("user_message", "") or "").replace("\n", " ")
+                    bm = (row.get("bot_message", "") or "").replace("\n", " ")
+                    st.markdown(f"- **あなた**: {um[:40]}{'…' if len(um)>40 else ''}")
+                    st.markdown(f"  **AI**: {bm[:40]}{'…' if len(bm)>40 else ''}")
+    else:
+        st.caption("まだ過去の相談はありません。")
+
     st.markdown("---")
     if st.button("ログアウト"):
         st.session_state.user = None
@@ -415,94 +476,25 @@ for key, label in phase_display:
 st.markdown("---")
 
 # ============================================================
-# 📤 8. 送信処理
+# 💬 8. 今日の会話（ChatGPT風：上に積み上げ）
 # ============================================================
-def submit():
-    user_text = st.session_state.get("user_input", "").strip()
-    if not user_text:
-        st.warning("何か入力してください。")
-        return
-    with st.spinner("AIエージェントは考えています…"):
-        try:
-            generate_response(user_text)
-        except Exception as e:
-            st.error(f"エラー: {e}")
-            return
-    st.session_state["user_input"] = ""
-    st.rerun()
-
-st.text_area(
-    "ご相談内容を入力してください",
-    height=120,
-    placeholder="どんなことでも大丈夫です。",
-    key="user_input"
-)
-st.button("送信 🌱", on_click=submit)
-
-# ============================================================
-# 🕒 9. 今日の会話履歴表示
-# ============================================================
-st.markdown("### 💬 今日の対話")
-
 for chat in st.session_state.chat_history:
-    st.markdown(
-        f"<div class='user-bubble'><b>あなた：</b> {chat['user']}</div>",
-        unsafe_allow_html=True
-    )
-    st.markdown(
-        f"<div class='bot-bubble'><b>AIエージェント：</b> {chat['bot']}</div>",
-        unsafe_allow_html=True
-    )
+    with st.chat_message("user"):
+        st.markdown(chat["user"])
+    with st.chat_message("assistant"):
+        st.markdown(chat["bot"])
 
 # ============================================================
-# 📅 10. 過去の会話を日付選択で閲覧
+# ⌨️ 9. 入力欄（下に固定）
 # ============================================================
-st.markdown("---")
-st.markdown("### 📅 過去の相談をひらく")
+user_text = st.chat_input("どんなことでも大丈夫です。ここに入力してください。")
 
-try:
-    res_dates = supabase.table("user_chats").select("chat_date") \
-        .eq("user_id", user_id) \
-        .order("chat_date", desc=True) \
-        .execute()
-    data_dates = res_dates.data if hasattr(res_dates, "data") else res_dates.get("data", [])
-    date_options = sorted({row["chat_date"] for row in data_dates}, reverse=True)
-except Exception as e:
-    st.error(f"過去の相談日リスト取得中にエラーが発生しました: {e}")
-    date_options = []
-
-if date_options:
-    selected_date = st.selectbox(
-        "日付を選択すると、その日の相談内容が表示されます",
-        options=date_options,
-        format_func=lambda d: str(d),
-        key="history_date_select"
-    )
-
-    if selected_date:
-        st.markdown(f"#### 📖 {selected_date} の相談履歴")
-        try:
-            res_hist = supabase.table("user_chats").select("*") \
-                .eq("user_id", user_id) \
-                .eq("chat_date", selected_date) \
-                .order("message_time", desc=False) \
-                .execute()
-            hist = res_hist.data if hasattr(res_hist, "data") else res_hist.get("data", [])
-        except Exception as e:
-            st.error(f"過去の相談履歴取得中にエラーが発生しました: {e}")
-            hist = []
-
-        if not hist:
-            st.info("この日には記録された相談はありません。")
-        else:
-            for row in hist:
-                st.markdown(
-                    f"<div class='user-bubble'><b>あなた：</b> {row.get('user_message','')}</div>",
-                    unsafe_allow_html=True
-                )
-                st.markdown(
-                    f"<div class='bot-bubble'><b>AIエージェント：</b> {row.get('bot_message','')}</div>",
-                    unsafe_allow_html=True
-                )
-else:
-    st.info("まだ記録された過去の相談はありません。")
+if user_text:
+    user_text = user_text.strip()
+    if user_text:
+        with st.spinner("AIエージェントは考えています…"):
+            try:
+                generate_response(user_text)
+            except Exception as e:
+                st.error(f"エラー: {e}")
+        st.rerun()
