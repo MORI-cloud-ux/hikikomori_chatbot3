@@ -44,20 +44,11 @@ except Exception as e:
     st.error(f"知識ベースJSONの読み込みに失敗しました: {e}")
     st.stop()
 
-# action_cards をID→カードの辞書へ
-ACTION_CARDS = {}
-for card in knowledge_base.get("action_cards", []) or []:
-    cid = card.get("id")
-    if cid:
-        ACTION_CARDS[cid] = card
-
-# slot_schema
 SLOT_SCHEMA = knowledge_base.get("slot_schema", {}) or {}
 
 def default_slots_from_schema(schema: dict) -> dict:
     slots = {}
-    for k, meta in schema.items():
-        # valuesに「不明」がある前提だが、なければ不明を採用
+    for k in schema.keys():
         slots[k] = "不明"
     return slots
 
@@ -194,22 +185,17 @@ if not user_id:
 today_str = date.today().isoformat()
 
 # ============================================================
-# 🌱 3. チャット用のセッション状態（slots含む）
+# 🌱 3. チャット用のセッション状態（slotsは内部用）
 # ============================================================
 if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []  # 今日の会話のみ（DBから読み込み）
+    st.session_state.chat_history = []
 
 if "current_phase" not in st.session_state:
     st.session_state.current_phase = None
 
+# 内部制御用（画面表示しない）
 if "slots" not in st.session_state:
     st.session_state.slots = default_slots_from_schema(SLOT_SCHEMA)
-
-if "last_questions" not in st.session_state:
-    st.session_state.last_questions = []
-
-if "last_selected_cards" not in st.session_state:
-    st.session_state.last_selected_cards = []
 
 # ============================================================
 # 📥 4. 今日の会話履歴を Supabase から読み込む（フェーズ復元）
@@ -242,10 +228,6 @@ load_today_history(user_id)
 # 🔧 ユーティリティ：JSONの安全パース
 # ============================================================
 def safe_json_load(s: str) -> dict:
-    """
-    LLMが余計な文字を混ぜても、最初の {...} を抜き出してJSON parseする救済。
-    それでもダメなら例外を投げる。
-    """
     try:
         return json.loads(s)
     except Exception:
@@ -260,31 +242,28 @@ def normalize_phase(p: str) -> str:
     return "phase_1"
 
 def validate_slot_value(slot_key: str, value: str) -> str:
-    """
-    schemaのvaluesに含まれれば採用。なければ不明。
-    """
     meta = SLOT_SCHEMA.get(slot_key, {})
     allowed = meta.get("values", []) or []
     if value in allowed:
         return value
-    # valuesに不明がない場合でも、保険で不明
     return "不明"
 
 # ============================================================
-# 🧠 5. システムプロンプト生成（JSON出力を強制）
+# 🧠 5. システムプロンプト生成（UIに表示しない情報も回答文に内包）
 # ============================================================
 def build_system_prompt(fixed_phase=None, is_first_today=False):
     prompt = ""
     prompt += "あなたは不登校・ひきこもり支援の専門家です。\n"
-    prompt += "利用者に共感し、責めず、現実的で安全な一歩を提案してください。\n"
+    prompt += "利用者に共感し、責めず、安全を優先し、現実的で具体的な一歩を提案してください。\n"
     prompt += "知識ベース（phases/compass_principles/key_scenes/slot_schema/action_cards）に基づいて応答してください。\n"
     prompt += "\n"
     prompt += "【重要ルール】\n"
     prompt += "- 出力は必ず「JSONのみ」。本文の外に説明や注釈、Markdown、コードブロックを書かない。\n"
     prompt += "- 推測でスロットを埋めない。根拠が弱い場合は「不明」のまま。\n"
-    prompt += "- 確認質問は最大2つ。必要な分岐に直結するものだけ。\n"
-    prompt += "- action_cards は最大3枚まで選ぶ。選ぶ時は id を返す。\n"
-    prompt += "- 緊急性が高い可能性があるときは、安全確保の確認を優先する（一般助言を先にしない）。\n"
+    prompt += "- 確認質問は最大2つ。\n"
+    prompt += "- action_cards は最大3枚まで選ぶ。\n"
+    prompt += "- ただし、質問や支援カードの内容はUIに別表示しないため、必ず response の文章の中に自然に含める（質問がある場合は文中で尋ねる。支援策は具体策として文章中に書く）。\n"
+    prompt += "- 緊急性が高い可能性があるときは、安全確保の確認を優先する。\n"
     prompt += "\n"
 
     if is_first_today:
@@ -299,7 +278,7 @@ def build_system_prompt(fixed_phase=None, is_first_today=False):
     prompt += '  "slots_update": { "SLOT_KEY": "VALUE", "...": "..." },\n'
     prompt += '  "questions": ["質問1","質問2"],\n'
     prompt += '  "selected_action_card_ids": ["AC_...","AC_..."],\n'
-    prompt += '  "response": "相談者への回答（共感→要約→質問→提案の順。短く具体的に）"\n'
+    prompt += '  "response": "相談者への回答（この文章の中に、必要な確認質問も、具体的支援も、次の一歩も全部含める）"\n'
     prompt += "}\n"
     prompt += "\n"
 
@@ -312,7 +291,7 @@ def build_system_prompt(fixed_phase=None, is_first_today=False):
     return prompt
 
 # ============================================================
-# 🤖 6. GPT応答生成 ＋ Supabase 保存（JSONをパースして状態更新）
+# 🤖 6. GPT応答生成 ＋ Supabase 保存（UI表示用の質問/カードは保持しない）
 # ============================================================
 def generate_response(user_input: str) -> str:
     is_first_today = (len(st.session_state.chat_history) == 0 or st.session_state.current_phase is None)
@@ -320,7 +299,6 @@ def generate_response(user_input: str) -> str:
 
     messages = [{"role": "system", "content": build_system_prompt(fixed_phase=fixed_phase, is_first_today=is_first_today)}]
 
-    # 今日の履歴だけ渡す（保存している bot_message = response_text）
     for chat in st.session_state.chat_history:
         messages.append({"role": "user", "content": f"相談者の発言: {chat['user']}"})
         messages.append({"role": "assistant", "content": chat["bot"]})
@@ -337,8 +315,7 @@ def generate_response(user_input: str) -> str:
     try:
         obj = safe_json_load(raw)
     except Exception as e:
-        st.error(f"AIの出力JSONの解析に失敗しました。出力形式の乱れの可能性があります。\n{e}")
-        # 解析できない場合は、rawをそのまま返して保存（最低限動かす）
+        st.error(f"AIの出力JSONの解析に失敗しました（形式乱れの可能性）: {e}")
         response_text = raw
         phase_for_row = st.session_state.current_phase or "phase_1"
         try:
@@ -351,48 +328,26 @@ def generate_response(user_input: str) -> str:
             }).execute()
         except Exception as e2:
             st.error(f"会話の保存中にエラーが発生しました: {e2}")
-        st.session_state.last_questions = []
-        st.session_state.last_selected_cards = []
         return response_text
 
-    # --- phase ---
     phase_out = normalize_phase(obj.get("phase", "phase_1"))
     if is_first_today:
         st.session_state.current_phase = phase_out
-    # 2回目以降は固定（LLMがズラしても上書き）
     phase_for_row = st.session_state.current_phase or phase_out
 
-    # --- slots_update ---
     slots_update = obj.get("slots_update", {}) or {}
     for k in st.session_state.slots.keys():
         if k in slots_update:
             v = slots_update.get(k)
             if isinstance(v, str):
                 v_norm = validate_slot_value(k, v)
-                # 「不明」以外のみ採用（既知を不明で潰さない）
                 if v_norm != "不明":
                     st.session_state.slots[k] = v_norm
 
-    # --- questions ---
-    questions = obj.get("questions", []) or []
-    if not isinstance(questions, list):
-        questions = []
-    # 最大2つに制限
-    questions = [q for q in questions if isinstance(q, str) and q.strip()][:2]
-
-    # --- selected_action_card_ids ---
-    selected_cards = obj.get("selected_action_card_ids", []) or []
-    if not isinstance(selected_cards, list):
-        selected_cards = []
-    selected_cards = [c for c in selected_cards if isinstance(c, str) and c.strip()]
-    selected_cards = selected_cards[:3]
-
-    # --- response text ---
     response_text = obj.get("response", "").strip()
     if not response_text:
         response_text = "（すみません、うまく回答を生成できませんでした。もう一度、状況を短く教えてください。）"
 
-    # --- Supabase に保存 ---
     try:
         supabase.table("user_chats").insert({
             "user_id": user_id,
@@ -404,37 +359,23 @@ def generate_response(user_input: str) -> str:
     except Exception as e:
         st.error(f"会話の保存中にエラーが発生しました: {e}")
 
-    # --- セッションに保持（UI表示用） ---
-    st.session_state.last_questions = questions
-    st.session_state.last_selected_cards = selected_cards
-
     return response_text
 
 # ============================================================
-# 🧾 Sidebar（ログアウト＋状態表示）
+# 🧾 Sidebar（ログアウトのみ＋最小表示）
 # ============================================================
 with st.sidebar:
     st.markdown(f"**ログイン中:** {getattr(user, 'email', '')}")
-
     st.markdown("---")
     st.markdown("### 🧭 今日の状態")
     st.markdown(f"- 日付: {today_str}")
     st.markdown(f"- Phase: `{st.session_state.current_phase or '未推定'}`")
-
-    # slots 表示
-    st.markdown("### 🧩 スロット（推定）")
-    for k, v in st.session_state.slots.items():
-        desc = SLOT_SCHEMA.get(k, {}).get("desc", k)
-        st.markdown(f"- {desc}: **{v}**")
-
     st.markdown("---")
     if st.button("ログアウト"):
         st.session_state.user = None
         st.session_state.chat_history = []
         st.session_state.current_phase = None
         st.session_state.slots = default_slots_from_schema(SLOT_SCHEMA)
-        st.session_state.last_questions = []
-        st.session_state.last_selected_cards = []
         try:
             supabase.auth.sign_out()
         except Exception:
@@ -482,7 +423,6 @@ def submit():
     st.session_state["user_input"] = ""
     st.rerun()
 
-# --- 入力欄 ---
 st.text_area(
     "ご相談内容を入力してください",
     height=120,
@@ -492,54 +432,7 @@ st.text_area(
 st.button("送信 🌱", on_click=submit)
 
 # ============================================================
-# ✅ 9. 追加質問（インタラクティブ）
-# ============================================================
-if st.session_state.last_questions:
-    st.markdown("### ✅ 追加で教えてほしいこと（最大2つ）")
-    for q in st.session_state.last_questions:
-        st.markdown(f"- {q}")
-
-# ============================================================
-# 🧭 10. 支援カード表示（action_cards）
-# ============================================================
-if st.session_state.last_selected_cards:
-    st.markdown("### 🧭 今回の支援のヒント（支援カード）")
-    for cid in st.session_state.last_selected_cards:
-        card = ACTION_CARDS.get(cid)
-        if not card:
-            st.markdown(f"- {cid}（カード詳細が見つかりません）")
-            continue
-
-        title = card.get("title", cid)
-        with st.expander(f"🌿 {title}（{cid}）", expanded=True):
-            scene = card.get("scene", "")
-            if scene:
-                st.markdown(f"**場面:** {scene}")
-
-            do_list = card.get("do", []) or []
-            if do_list:
-                st.markdown("**やってみること**")
-                for item in do_list:
-                    st.markdown(f"- {item}")
-
-            avoid_list = card.get("avoid", []) or []
-            if avoid_list:
-                st.markdown("**避けたいこと**")
-                for item in avoid_list:
-                    st.markdown(f"- {item}")
-
-            phrases = card.get("phrases", []) or []
-            if phrases:
-                st.markdown("**声かけ例**")
-                for p in phrases:
-                    st.markdown(f"- {p}")
-
-            next_step = card.get("next_step", "")
-            if next_step:
-                st.markdown(f"**次の一歩:** {next_step}")
-
-# ============================================================
-# 🕒 11. 今日の会話履歴表示（画面下）
+# 🕒 9. 今日の会話履歴表示
 # ============================================================
 st.markdown("### 💬 今日の対話")
 
@@ -554,7 +447,7 @@ for chat in st.session_state.chat_history:
     )
 
 # ============================================================
-# 📅 12. 過去の会話を日付選択で閲覧
+# 📅 10. 過去の会話を日付選択で閲覧
 # ============================================================
 st.markdown("---")
 st.markdown("### 📅 過去の相談をひらく")
