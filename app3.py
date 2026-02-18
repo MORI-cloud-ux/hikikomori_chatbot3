@@ -22,7 +22,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 st.set_page_config(
     page_title="🌿 不登校・ひきこもり相談AIエージェント",
     layout="wide",
-    initial_sidebar_state="expanded",  # ✅ 起動時にサイドバーを開く
+    initial_sidebar_state="expanded",
 )
 
 # ============================================================
@@ -161,7 +161,6 @@ if "current_phase" not in st.session_state:
 if "slots" not in st.session_state:
     st.session_state.slots = default_slots_from_schema(SLOT_SCHEMA)
 
-# ✅ どの日の履歴をメインに表示するか（既定は今日）
 if "view_date" not in st.session_state:
     st.session_state.view_date = today_str
 
@@ -234,9 +233,6 @@ def get_hist_for_date(d: str):
         return []
 
 def get_phase_timeline():
-    """
-    日ごとのフェーズ（その日の最初に確定したphase）を一覧で返す
-    """
     try:
         res = supabase.table("user_chats").select("chat_date,phase,message_time") \
             .eq("user_id", user_id) \
@@ -432,7 +428,6 @@ with st.sidebar:
     if not timeline:
         st.caption("まだフェーズ履歴がありません。")
     else:
-        # 新しい日付が上
         for item in timeline[::-1]:
             st.markdown(f"- {item['chat_date']}: `{item['phase']}`")
 
@@ -464,6 +459,8 @@ phase_display = [
     ("phase_3", "Phase 3：希求・模索期（関わりや意味の模索している時期）"),
     ("phase_4", "Phase 4：転回期（価値観の転換と再出発に向けた時期）"),
 ]
+
+PHASE_LABELS = {k: v for k, v in phase_display}
 
 if st.session_state.current_phase is None:
     st.markdown("まだフェーズは推定されていません。最初の相談内容を送信すると推定されます。")
@@ -530,8 +527,10 @@ else:
             phase_for_view = r.get("phase")
             break
 
+phase_label = PHASE_LABELS.get(phase_for_view, "未推定")
+
 st.markdown(f"### 💬 対話（{view_date}）")
-st.markdown(f"**🧭 表示中の日付:** {view_date}　／　**Phase:** `{phase_for_view or '未推定'}`")
+st.markdown(f"**🧭 表示中の日付:** {view_date}　／　**Phase:** {phase_label}")
 
 if not display_history:
     st.info("この日に記録された相談はありません。")
