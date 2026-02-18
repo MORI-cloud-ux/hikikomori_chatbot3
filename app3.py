@@ -264,6 +264,12 @@ def build_system_prompt(fixed_phase=None, is_first_today=False):
     prompt += "- action_cards は最大3枚まで選ぶ。\n"
     prompt += "- ただし、質問や支援カードの内容はUIに別表示しないため、必ず response の文章の中に自然に含める（質問がある場合は文中で尋ねる。支援策は具体策として文章中に書く）。\n"
     prompt += "- 緊急性が高い可能性があるときは、安全確保の確認を優先する。\n"
+    prompt += "- 抽象的な理念だけで終わらせない。\n"
+    prompt += "- 必ず具体的な声かけ例を最低2つ提示する。\n"
+    prompt += "- 必ず段階的な小さな行動例（0か100かではない中間案）を2つ以上提示する。\n"
+    prompt += "- 明日そのまま使える表現にする。\n"
+    prompt += "- 命令口調や断定は避ける。\n"
+    prompt += "- 実務性と安心感のバランスを取る。\n"
     prompt += "\n"
 
     if is_first_today:
