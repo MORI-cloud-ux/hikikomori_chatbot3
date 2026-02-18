@@ -150,7 +150,7 @@ if not user_id:
 today_str = date.today().isoformat()
 
 # ============================================================
-# 🌱 3. チャット用のセッション状態（slotsは内部用）
+# 🌱 3. セッション状態
 # ============================================================
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
@@ -160,6 +160,10 @@ if "current_phase" not in st.session_state:
 
 if "slots" not in st.session_state:
     st.session_state.slots = default_slots_from_schema(SLOT_SCHEMA)
+
+# ✅ どの日の履歴をメインに表示するか（既定は今日）
+if "view_date" not in st.session_state:
+    st.session_state.view_date = today_str
 
 # ============================================================
 # 📥 4. 今日の会話履歴を Supabase から読み込む（フェーズ復元）
@@ -198,10 +202,14 @@ def get_date_options():
             .order("chat_date", desc=True) \
             .execute()
         data_dates = res_dates.data if hasattr(res_dates, "data") else res_dates.get("data", [])
-        return sorted({row["chat_date"] for row in data_dates}, reverse=True)
+        opts = sorted({row["chat_date"] for row in data_dates}, reverse=True)
+        # 今日が無い場合は追加（空でも選べるように）
+        if today_str not in opts:
+            opts = [today_str] + opts
+        return opts
     except Exception as e:
         st.error(f"過去の相談日リスト取得中にエラーが発生しました: {e}")
-        return []
+        return [today_str]
 
 def get_hist_for_date(d: str):
     try:
@@ -357,7 +365,7 @@ def generate_response(user_input: str) -> str:
     return response_text
 
 # ============================================================
-# 🧾 Sidebar（履歴＋ログアウト）
+# 🧾 Sidebar（日付選択＋ログアウト）
 # ============================================================
 with st.sidebar:
     st.markdown(f"**ログイン中:** {getattr(user, 'email', '')}")
@@ -367,39 +375,21 @@ with st.sidebar:
     st.markdown(f"- Phase: `{st.session_state.current_phase or '未推定'}`")
 
     st.markdown("---")
-    st.markdown("### 💬 今日の履歴（一覧）")
-    if st.session_state.chat_history:
-        for i, chat in enumerate(st.session_state.chat_history, start=1):
-            preview = (chat.get("user", "") or "").replace("\n", " ")
-            if len(preview) > 30:
-                preview = preview[:30] + "…"
-            st.markdown(f"{i}. {preview}")
-    else:
-        st.caption("まだ今日の履歴はありません。")
-
-    st.markdown("---")
-    st.markdown("### 📅 過去の相談をひらく")
+    st.markdown("### 📅 履歴を見る日を選ぶ")
     date_options = get_date_options()
 
-    if date_options:
-        selected_date = st.selectbox(
-            "日付を選択",
-            options=date_options,
-            format_func=lambda d: str(d),
-            key="history_date_select_sidebar"
-        )
-        if selected_date:
-            hist = get_hist_for_date(selected_date)
-            if not hist:
-                st.caption("この日には記録された相談はありません。")
-            else:
-                for row in hist[-20:]:
-                    um = (row.get("user_message", "") or "").replace("\n", " ")
-                    bm = (row.get("bot_message", "") or "").replace("\n", " ")
-                    st.markdown(f"- **あなた**: {um[:40]}{'…' if len(um)>40 else ''}")
-                    st.markdown(f"  **AI**: {bm[:40]}{'…' if len(bm)>40 else ''}")
-    else:
-        st.caption("まだ過去の相談はありません。")
+    idx = 0
+    if st.session_state.view_date in date_options:
+        idx = date_options.index(st.session_state.view_date)
+
+    selected_date = st.selectbox(
+        "日付",
+        options=date_options,
+        format_func=lambda d: str(d),
+        key="history_date_select_sidebar",
+        index=idx
+    )
+    st.session_state.view_date = selected_date
 
     st.markdown("---")
     if st.button("ログアウト"):
@@ -407,6 +397,7 @@ with st.sidebar:
         st.session_state.chat_history = []
         st.session_state.current_phase = None
         st.session_state.slots = default_slots_from_schema(SLOT_SCHEMA)
+        st.session_state.view_date = today_str
         try:
             supabase.auth.sign_out()
         except Exception:
@@ -437,7 +428,6 @@ for key, label in phase_display:
 
 # ============================================================
 # ✅ メインにも「履歴を開く」ボタン（popover）
-#    → サイドバーが閉じていても履歴にアクセスできる
 # ============================================================
 with st.popover("📚 履歴・今日の状態を開く"):
     st.markdown("### 🧭 今日の状態")
@@ -445,62 +435,60 @@ with st.popover("📚 履歴・今日の状態を開く"):
     st.markdown(f"- Phase: `{st.session_state.current_phase or '未推定'}`")
 
     st.markdown("---")
-    st.markdown("### 💬 今日の履歴（一覧）")
-    if st.session_state.chat_history:
-        for i, chat in enumerate(st.session_state.chat_history, start=1):
-            preview = (chat.get("user", "") or "").replace("\n", " ")
-            if len(preview) > 30:
-                preview = preview[:30] + "…"
-            st.markdown(f"{i}. {preview}")
-    else:
-        st.caption("まだ今日の履歴はありません。")
-
-    st.markdown("---")
-    st.markdown("### 📅 過去の相談をひらく")
+    st.markdown("### 📅 履歴を見る日を選ぶ")
     date_options_pop = get_date_options()
 
-    if date_options_pop:
-        selected_date_pop = st.selectbox(
-            "日付を選択",
-            options=date_options_pop,
-            format_func=lambda d: str(d),
-            key="history_date_select_popover"  # ✅ sidebarと別キー
-        )
-        if selected_date_pop:
-            hist_pop = get_hist_for_date(selected_date_pop)
-            if not hist_pop:
-                st.caption("この日には記録された相談はありません。")
-            else:
-                for row in hist_pop[-20:]:
-                    um = (row.get("user_message", "") or "").replace("\n", " ")
-                    bm = (row.get("bot_message", "") or "").replace("\n", " ")
-                    st.markdown(f"- **あなた**: {um[:40]}{'…' if len(um)>40 else ''}")
-                    st.markdown(f"  **AI**: {bm[:40]}{'…' if len(bm)>40 else ''}")
-    else:
-        st.caption("まだ過去の相談はありません。")
+    idxp = 0
+    if st.session_state.view_date in date_options_pop:
+        idxp = date_options_pop.index(st.session_state.view_date)
+
+    selected_date_pop = st.selectbox(
+        "日付",
+        options=date_options_pop,
+        format_func=lambda d: str(d),
+        key="history_date_select_popover",
+        index=idxp
+    )
+    st.session_state.view_date = selected_date_pop
 
 st.markdown("---")
 
 # ============================================================
-# 💬 8. 今日の会話（ChatGPT風：上に積み上げ）
+# 💬 8. 会話表示（選択した日付：view_date をメインに全文表示）
 # ============================================================
-for chat in st.session_state.chat_history:
-    with st.chat_message("user"):
-        st.markdown(chat["user"])
-    with st.chat_message("assistant"):
-        st.markdown(chat["bot"])
+view_date = st.session_state.get("view_date", today_str)
+
+if view_date == today_str:
+    display_history = st.session_state.chat_history
+else:
+    rows = get_hist_for_date(view_date)
+    display_history = [{"user": r.get("user_message", ""), "bot": r.get("bot_message", "")} for r in rows]
+
+st.markdown(f"### 💬 対話（{view_date}）")
+
+if not display_history:
+    st.info("この日に記録された相談はありません。")
+else:
+    for chat in display_history:
+        with st.chat_message("user"):
+            st.markdown(chat["user"])
+        with st.chat_message("assistant"):
+            st.markdown(chat["bot"])
 
 # ============================================================
-# ⌨️ 9. 入力欄（下に固定）
+# ⌨️ 9. 入力欄（今日を見ているときだけ表示）
 # ============================================================
-user_text = st.chat_input("どんなことでも大丈夫です。ここに入力してください。")
+if st.session_state.view_date == today_str:
+    user_text = st.chat_input("どんなことでも大丈夫です。ここに入力してください。")
 
-if user_text:
-    user_text = user_text.strip()
     if user_text:
-        with st.spinner("AIエージェントは考えています…"):
-            try:
-                generate_response(user_text)
-            except Exception as e:
-                st.error(f"エラー: {e}")
-        st.rerun()
+        user_text = user_text.strip()
+        if user_text:
+            with st.spinner("AIエージェントは考えています…"):
+                try:
+                    generate_response(user_text)
+                except Exception as e:
+                    st.error(f"エラー: {e}")
+            st.rerun()
+else:
+    st.caption("※ 過去の履歴を閲覧中です。入力するには「今日」を選択してください。")
