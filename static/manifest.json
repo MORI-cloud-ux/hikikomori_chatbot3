@@ -2,19 +2,23 @@
   "short_name": "相談AI",
   "name": "不登校・ひきこもり相談AIエージェント",
   "description": "不登校やひきこもりに関する悩みに寄り添い、家庭での関わり方や次の一歩を一緒に考えるAI相談アプリです。",
-  "start_url": "/",
+  "start_url": "https://hikikomorichatbot3-vrsxeawb3gjpy6reqqmgmw.streamlit.app/",
+  "scope": "https://hikikomorichatbot3-vrsxeawb3gjpy6reqqmgmw.streamlit.app/",
   "display": "standalone",
   "background_color": "#ffffff",
   "theme_color": "#a5d6a7",
   "orientation": "portrait",
+  "lang": "ja",
+  "dir": "ltr",
+  "id": "hikikomori-ai-agent",
   "icons": [
     {
-      "src": "icon-192.png",
+      "src": "https://raw.githubusercontent.com/MORI-cloud-ux/hikikomori_chatbot3/main/static/icon-192.png",
       "sizes": "192x192",
       "type": "image/png"
     },
     {
-      "src": "icon-512.png",
+      "src": "https://raw.githubusercontent.com/MORI-cloud-ux/hikikomori_chatbot3/main/static/icon-512.png",
       "sizes": "512x512",
       "type": "image/png"
     }
