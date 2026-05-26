@@ -27,7 +27,7 @@ st.set_page_config(
 )
 # --- PWA manifest 読み込み ---
 st.markdown("""
-<link rel="manifest" href="static/manifest.json">
+<link rel="manifest" href="https://raw.githubusercontent.com/MORI-cloud-ux/hikikomori_chatbot3/main/static/manifest.json">
 <meta name="theme-color" content="#a5d6a7">
 """, unsafe_allow_html=True)
 
