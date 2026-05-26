@@ -21,10 +21,15 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # --- Streamlit UI設定 ---
 st.set_page_config(
     page_title="🌿 不登校・ひきこもり相談AIエージェント",
-    page_icon="static/favicon_512.png",
+    page_icon="🌿",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+# --- PWA manifest 読み込み ---
+st.markdown("""
+<link rel="manifest" href="/static/manifest.json">
+<meta name="theme-color" content="#a5d6a7">
+""", unsafe_allow_html=True)
 
 # ============================================================
 # 📚 0. 知識ベースJSONの読み込み（knowledge_base.json）
