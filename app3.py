@@ -21,6 +21,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # --- Streamlit UI設定 ---
 st.set_page_config(
     page_title="🌿 不登校・ひきこもり相談AIエージェント",
+    page_icon=".streamlit/static/favicon_512.png",
     layout="wide",
     initial_sidebar_state="expanded",
 )
